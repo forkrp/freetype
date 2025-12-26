@@ -1,0 +1,312 @@
+# GitHub Actions workflow for building FreeType static libraries
+# Builds for iOS, macOS, and Android platforms using CMake
+
+name: Build Static Libraries
+
+on:
+  push:
+    branches: [ master, main, release/* ]
+    tags:
+      - 'v*'
+      - 'VER-*'
+  pull_request:
+    branches: [ master, main, release/* ]
+  workflow_dispatch:
+
+env:
+  # Disable all optional dependencies for minimal static build
+  CMAKE_COMMON_ARGS: >-
+    -D CMAKE_BUILD_TYPE=Release
+    -D FT_DISABLE_BROTLI=TRUE
+    -D FT_DISABLE_BZIP2=TRUE
+    -D FT_DISABLE_HARFBUZZ=TRUE
+    -D FT_DISABLE_PNG=TRUE
+    -D FT_DISABLE_ZLIB=TRUE
+
+jobs:
+  # ===========================================
+  # macOS Build (Universal Binary: arm64 + x86_64)
+  # ===========================================
+  build-macos:
+    name: macOS Universal
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build for arm64
+        run: |
+          cmake -B build-arm64 \
+            ${{ env.CMAKE_COMMON_ARGS }} \
+            -D CMAKE_OSX_ARCHITECTURES=arm64
+          cmake --build build-arm64 --config Release
+
+      - name: Build for x86_64
+        run: |
+          cmake -B build-x86_64 \
+            ${{ env.CMAKE_COMMON_ARGS }} \
+            -D CMAKE_OSX_ARCHITECTURES=x86_64
+          cmake --build build-x86_64 --config Release
+
+      - name: Create Universal Binary
+        run: |
+          mkdir -p output/macos/lib
+          mkdir -p output/macos/include
+
+          # Create universal static library
+          lipo -create \
+            build-arm64/libfreetype.a \
+            build-x86_64/libfreetype.a \
+            -output output/macos/lib/libfreetype.a
+
+          # Verify universal binary
+          lipo -info output/macos/lib/libfreetype.a
+
+          # Copy headers
+          cp -R include/freetype output/macos/include/
+          cp include/ft2build.h output/macos/include/
+          cp build-arm64/include/freetype/config/ftconfig.h output/macos/include/freetype/config/
+          cp build-arm64/include/freetype/config/ftoption.h output/macos/include/freetype/config/
+
+      - name: Package
+        run: |
+          cd output
+          tar -czvf freetype-macos.tar.gz macos
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetype-macos
+          path: output/freetype-macos.tar.gz
+
+  # ===========================================
+  # iOS Build (Device + Simulator XCFramework)
+  # ===========================================
+  build-ios:
+    name: iOS XCFramework
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build for iOS Device (arm64)
+        run: |
+          cmake -B build-ios-device \
+            ${{ env.CMAKE_COMMON_ARGS }} \
+            -D CMAKE_SYSTEM_NAME=iOS \
+            -D CMAKE_OSX_SYSROOT=iphoneos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 \
+            -D CMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          cmake --build build-ios-device --config Release
+
+      - name: Build for iOS Simulator (arm64)
+        run: |
+          cmake -B build-ios-sim-arm64 \
+            ${{ env.CMAKE_COMMON_ARGS }} \
+            -D CMAKE_SYSTEM_NAME=iOS \
+            -D CMAKE_OSX_SYSROOT=iphonesimulator \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 \
+            -D CMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          cmake --build build-ios-sim-arm64 --config Release
+
+      - name: Build for iOS Simulator (x86_64)
+        run: |
+          cmake -B build-ios-sim-x64 \
+            ${{ env.CMAKE_COMMON_ARGS }} \
+            -D CMAKE_SYSTEM_NAME=iOS \
+            -D CMAKE_OSX_SYSROOT=iphonesimulator \
+            -D CMAKE_OSX_ARCHITECTURES=x86_64 \
+            -D CMAKE_OSX_DEPLOYMENT_TARGET=12.0
+          cmake --build build-ios-sim-x64 --config Release
+
+      - name: Create fat library for simulator
+        run: |
+          mkdir -p build-ios-sim
+          lipo -create \
+            build-ios-sim-arm64/libfreetype.a \
+            build-ios-sim-x64/libfreetype.a \
+            -output build-ios-sim/libfreetype.a
+          lipo -info build-ios-sim/libfreetype.a
+
+      - name: Create XCFramework
+        run: |
+          mkdir -p output/ios
+
+          xcodebuild -create-xcframework \
+            -library build-ios-device/libfreetype.a \
+            -headers include \
+            -library build-ios-sim/libfreetype.a \
+            -headers include \
+            -output output/ios/freetype.xcframework
+
+          # Copy generated config headers to XCFramework
+          # Find the actual directory names created by xcodebuild
+          DEVICE_DIR=$(find output/ios/freetype.xcframework -type d -name "ios-arm64" | head -1)
+          SIM_DIR=$(find output/ios/freetype.xcframework -type d -name "*simulator*" | head -1)
+
+          if [ -n "$DEVICE_DIR" ]; then
+            cp build-ios-device/include/freetype/config/ftconfig.h "$DEVICE_DIR/Headers/freetype/config/"
+            cp build-ios-device/include/freetype/config/ftoption.h "$DEVICE_DIR/Headers/freetype/config/"
+          fi
+
+          if [ -n "$SIM_DIR" ]; then
+            cp build-ios-sim-arm64/include/freetype/config/ftconfig.h "$SIM_DIR/Headers/freetype/config/"
+            cp build-ios-sim-arm64/include/freetype/config/ftoption.h "$SIM_DIR/Headers/freetype/config/"
+          fi
+
+      - name: Package
+        run: |
+          cd output/ios
+          zip -r ../freetype-ios.zip freetype.xcframework
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetype-ios
+          path: output/freetype-ios.zip
+
+  # ===========================================
+  # Android Build (armeabi-v7a, arm64-v8a, x86, x86_64)
+  # ===========================================
+  build-android:
+    name: Android
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build for ${{ matrix.abi }}
+        run: |
+          cmake -B build-${{ matrix.abi }} \
+            ${{ env.CMAKE_COMMON_ARGS }} \
+            -D CMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -D ANDROID_ABI=${{ matrix.abi }} \
+            -D ANDROID_PLATFORM=android-21 \
+            -D ANDROID_STL=c++_static
+          cmake --build build-${{ matrix.abi }} --config Release
+
+      - name: Package
+        run: |
+          mkdir -p output/android/${{ matrix.abi }}
+          cp build-${{ matrix.abi }}/libfreetype.a output/android/${{ matrix.abi }}/
+
+          # Only copy headers once (from first abi)
+          if [ "${{ matrix.abi }}" = "armeabi-v7a" ]; then
+            mkdir -p output/android/include
+            cp -R include/freetype output/android/include/
+            cp include/ft2build.h output/android/include/
+            cp build-${{ matrix.abi }}/include/freetype/config/ftconfig.h output/android/include/freetype/config/
+            cp build-${{ matrix.abi }}/include/freetype/config/ftoption.h output/android/include/freetype/config/
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetype-android-${{ matrix.abi }}
+          path: output/android/
+
+  # ===========================================
+  # Combine Android artifacts
+  # ===========================================
+  package-android:
+    name: Package Android
+    runs-on: ubuntu-latest
+    needs: build-android
+    steps:
+      - name: Download all Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: freetype-android-*
+          path: android-artifacts
+          merge-multiple: true
+
+      - name: Combine and package
+        run: |
+          mkdir -p output
+          cp -R android-artifacts output/android
+          cd output
+          tar -czvf freetype-android.tar.gz android
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: freetype-android
+          path: output/freetype-android.tar.gz
+
+      - name: Cleanup individual artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: freetype-android-*
+
+  # ===========================================
+  # Create Release (only on tag push)
+  # ===========================================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-macos, build-ios, package-android]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          cp artifacts/freetype-macos/freetype-macos.tar.gz release/
+          cp artifacts/freetype-ios/freetype-ios.zip release/
+          cp artifacts/freetype-android/freetype-android.tar.gz release/
+          ls -la release/
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FreeType ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## FreeType Static Libraries
+
+            ### Included Platforms
+
+            - **macOS** (`freetype-macos.tar.gz`)
+              - Universal Binary (arm64 + x86_64)
+              - Static library: `libfreetype.a`
+
+            - **iOS** (`freetype-ios.zip`)
+              - XCFramework with Device (arm64) and Simulator (arm64 + x86_64) support
+              - `freetype.xcframework`
+
+            - **Android** (`freetype-android.tar.gz`)
+              - Architectures: armeabi-v7a, arm64-v8a, x86, x86_64
+              - Static library: `libfreetype.a`
+              - Minimum API Level: 21
+
+            ### Build Configuration
+
+            All builds are compiled with:
+            - Release mode
+            - No external dependencies (zlib, bzip2, png, harfbuzz, brotli disabled)
+
+          files: |
+            release/freetype-macos.tar.gz
+            release/freetype-ios.zip
+            release/freetype-android.tar.gz
+          draft: false
+          prerelease: false
+
