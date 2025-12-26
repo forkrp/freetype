@@ -16,9 +16,13 @@ on:
 env:
   # Disable all optional dependencies for minimal static build
   # CMAKE_POLICY_VERSION_MINIMUM=3.5 is for compatibility with older FreeType versions
+  # Hide all symbols for static library by overriding FT_EXPORT/FT_EXPORT_DEF macros
   CMAKE_COMMON_ARGS: >-
     -D CMAKE_BUILD_TYPE=Release
     -D CMAKE_POLICY_VERSION_MINIMUM=3.5
+    -D CMAKE_C_VISIBILITY_PRESET=hidden
+    -D CMAKE_VISIBILITY_INLINES_HIDDEN=ON
+    -D "CMAKE_C_FLAGS=-DFT_EXPORT(x)=x -DFT_EXPORT_DEF(x)=x -DFT_EXPORT_VAR(x)=x"
     -D FT_DISABLE_BROTLI=TRUE
     -D FT_DISABLE_BZIP2=TRUE
     -D FT_DISABLE_HARFBUZZ=TRUE
