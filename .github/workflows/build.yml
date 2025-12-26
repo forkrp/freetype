@@ -15,8 +15,10 @@ on:
 
 env:
   # Disable all optional dependencies for minimal static build
+  # CMAKE_POLICY_VERSION_MINIMUM=3.5 is for compatibility with older FreeType versions
   CMAKE_COMMON_ARGS: >-
     -D CMAKE_BUILD_TYPE=Release
+    -D CMAKE_POLICY_VERSION_MINIMUM=3.5
     -D FT_DISABLE_BROTLI=TRUE
     -D FT_DISABLE_BZIP2=TRUE
     -D FT_DISABLE_HARFBUZZ=TRUE
